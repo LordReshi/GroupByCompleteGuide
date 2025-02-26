@@ -1,28 +1,33 @@
 import pandas as pd
 from collections import Counter
 
-def analyze_rejection_clusters(df):
-    # Updated column names
-    # Region -> JUR
-    # Uts id -> Uti Id
-    # FO id -> Fo Message Id
-    # timestamp -> Report Snapshot Date
+def analyze_rejection_clusters(df, output_excel_path=None):
+    """
+    Analyzes rejection clusters and returns all results as dataframes.
+    Optionally saves results to Excel.
     
+    Args:
+        df: Input dataframe with columns 'Uti Id', 'Fo Message Id', 'Error Description', 
+            'Report Snapshot Date', and 'JUR'
+        output_excel_path: Optional path to save Excel file (e.g., 'analysis_results.xlsx')
+            
+    Returns:
+        Dict of dataframes with all analysis results
+    """
     # Ensure data is sorted chronologically within each bundle
     df = df.sort_values(['Uti Id', 'Fo Message Id', 'Report Snapshot Date'])
     
     # Step 1: Group messages by Uti Id and Fo Message Id to create bundles
-    # For each bundle, collect the sequence of error fields in chronological order
     bundles = []
     
     for (uti_id, fo_message_id), group in df.groupby(['Uti Id', 'Fo Message Id']):
-        error_fields = group['error_field'].tolist()  # Assumes the column with error field is called 'error_field'
-        jur = group['JUR'].iloc[0]  # Get the region (JUR) for this bundle
+        error_fields = group['Error Description'].tolist()
+        jur = group['JUR'].iloc[0]
         
-        # Create ordered sequence representation (e.g., 'A -> B -> C')
+        # Create ordered sequence representation
         ordered_sequence = ' -> '.join(error_fields)
         
-        # Create unordered representation (sorted alphabetically for consistent matching)
+        # Create unordered representation (sorted alphabetically)
         unordered_set = sorted(error_fields)
         unordered_key = ', '.join(unordered_set)
         
@@ -60,7 +65,7 @@ def analyze_rejection_clusters(df):
         aggfunc='sum',
         margins=True, 
         margins_name='Total'
-    ).fillna(0)
+    ).fillna(0).reset_index().rename(columns={'ordered_sequence': 'Error Sequence'})
     
     # Regional analysis for unordered clusters
     unordered_regional_matrix = pd.crosstab(
@@ -70,67 +75,136 @@ def analyze_rejection_clusters(df):
         aggfunc='sum',
         margins=True, 
         margins_name='Total'
-    ).fillna(0)
+    ).fillna(0).reset_index().rename(columns={'unordered_key': 'Error Set'})
     
     # Find clusters unique to specific regions (ordered)
-    region_specific_ordered = {}
+    region_specific_ordered_list = []
     for jur in ordered_clusters['JUR'].unique():
         # Get clusters that only appear in this region
-        region_clusters = ordered_regional_matrix.loc[
-            (ordered_regional_matrix[jur] > 0) & 
-            (ordered_regional_matrix.drop(['Total', jur], axis=1).sum(axis=1) == 0) &
-            (ordered_regional_matrix.index != 'Total')
-        ]
-        if not region_clusters.empty:
-            region_specific_ordered[jur] = region_clusters.index.tolist()
+        jur_columns = [col for col in ordered_regional_matrix.columns if col != 'Error Sequence' and col != 'Total' and col != jur]
+        
+        if jur_columns:  # Check if there are other regions to compare with
+            region_clusters = ordered_regional_matrix[
+                (ordered_regional_matrix[jur] > 0) & 
+                (ordered_regional_matrix[jur_columns].sum(axis=1) == 0) &
+                (ordered_regional_matrix['Error Sequence'] != 'Total')
+            ]
+            
+            for _, row in region_clusters.iterrows():
+                region_specific_ordered_list.append({
+                    'JUR': jur,
+                    'Error Sequence': row['Error Sequence'],
+                    'Count': row[jur]
+                })
+    
+    # Convert to DataFrame (empty DataFrame if no region-specific clusters)
+    if region_specific_ordered_list:
+        region_specific_ordered_df = pd.DataFrame(region_specific_ordered_list)
+    else:
+        region_specific_ordered_df = pd.DataFrame(columns=['JUR', 'Error Sequence', 'Count'])
     
     # Find clusters unique to specific regions (unordered)
-    region_specific_unordered = {}
+    region_specific_unordered_list = []
     for jur in unordered_clusters['JUR'].unique():
         # Get clusters that only appear in this region
-        region_clusters = unordered_regional_matrix.loc[
-            (unordered_regional_matrix[jur] > 0) & 
-            (unordered_regional_matrix.drop(['Total', jur], axis=1).sum(axis=1) == 0) &
-            (unordered_regional_matrix.index != 'Total')
-        ]
-        if not region_clusters.empty:
-            region_specific_unordered[jur] = region_clusters.index.tolist()
+        jur_columns = [col for col in unordered_regional_matrix.columns if col != 'Error Set' and col != 'Total' and col != jur]
+        
+        if jur_columns:  # Check if there are other regions to compare with
+            region_clusters = unordered_regional_matrix[
+                (unordered_regional_matrix[jur] > 0) & 
+                (unordered_regional_matrix[jur_columns].sum(axis=1) == 0) &
+                (unordered_regional_matrix['Error Set'] != 'Total')
+            ]
+            
+            for _, row in region_clusters.iterrows():
+                region_specific_unordered_list.append({
+                    'JUR': jur,
+                    'Error Set': row['Error Set'],
+                    'Count': row[jur]
+                })
     
-    return {
+    # Convert to DataFrame (empty DataFrame if no region-specific clusters)
+    if region_specific_unordered_list:
+        region_specific_unordered_df = pd.DataFrame(region_specific_unordered_list)
+    else:
+        region_specific_unordered_df = pd.DataFrame(columns=['JUR', 'Error Set', 'Count'])
+    
+    # Create top clusters summary dataframe
+    ordered_top_clusters = ordered_clusters.sort_values('cluster_count', ascending=False).head(20)
+    unordered_top_clusters = unordered_clusters.sort_values('cluster_count', ascending=False).head(20)
+    
+    # Summary dataframe with count of unique clusters by region
+    cluster_summary = pd.DataFrame({
+        'JUR': ordered_clusters['JUR'].unique()
+    })
+    
+    ordered_counts = ordered_clusters.groupby('JUR').size().reset_index(name='unique_ordered_clusters')
+    unordered_counts = unordered_clusters.groupby('JUR').size().reset_index(name='unique_unordered_clusters')
+    
+    cluster_summary = cluster_summary.merge(ordered_counts, on='JUR', how='left')
+    cluster_summary = cluster_summary.merge(unordered_counts, on='JUR', how='left')
+    cluster_summary = cluster_summary.fillna(0)
+    
+    # Add total row to summary
+    total_row = pd.DataFrame([{
+        'JUR': 'Total',
+        'unique_ordered_clusters': ordered_clusters['JUR'].nunique(),
+        'unique_unordered_clusters': unordered_clusters['JUR'].nunique()
+    }])
+    
+    cluster_summary = pd.concat([cluster_summary, total_row], ignore_index=True)
+    
+    # Prepare results as dataframes
+    results = {
         'ordered_clusters': ordered_clusters,
         'unordered_clusters': unordered_clusters,
         'ordered_regional_matrix': ordered_regional_matrix,
         'unordered_regional_matrix': unordered_regional_matrix,
-        'region_specific_ordered': region_specific_ordered,
-        'region_specific_unordered': region_specific_unordered
+        'region_specific_ordered': region_specific_ordered_df,
+        'region_specific_unordered': region_specific_unordered_df,
+        'ordered_top_clusters': ordered_top_clusters,
+        'unordered_top_clusters': unordered_top_clusters,
+        'cluster_summary': cluster_summary,
+        'bundle_details': bundle_df
     }
+    
+    # Optionally save results to Excel file
+    if output_excel_path:
+        with pd.ExcelWriter(output_excel_path) as writer:
+            # Summary sheet first
+            cluster_summary.to_excel(writer, sheet_name='Summary', index=False)
+            
+            # Top clusters
+            ordered_top_clusters.to_excel(writer, sheet_name='Top Ordered Clusters', index=False)
+            unordered_top_clusters.to_excel(writer, sheet_name='Top Unordered Clusters', index=False)
+            
+            # Complete clusters
+            ordered_clusters.to_excel(writer, sheet_name='Ordered Clusters', index=False)
+            unordered_clusters.to_excel(writer, sheet_name='Unordered Clusters', index=False)
+            
+            # Regional matrices
+            ordered_regional_matrix.to_excel(writer, sheet_name='Ordered Regional Matrix', index=False)
+            unordered_regional_matrix.to_excel(writer, sheet_name='Unordered Regional Matrix', index=False)
+            
+            # Region-specific sheets
+            region_specific_ordered_df.to_excel(writer, sheet_name='Region-Specific Ordered', index=False)
+            region_specific_unordered_df.to_excel(writer, sheet_name='Region-Specific Unordered', index=False)
+            
+            # Bundle details
+            bundle_df.to_excel(writer, sheet_name='Bundle Details', index=False)
+    
+    return results
 
-# Example usage
+# Example usage with Excel export
 """
-Assuming your dataframe is structured like:
-rejection_data = pd.DataFrame({
-    'Uti Id': ['U001', 'U001', 'U001', 'U002', 'U002', 'U003', 'U003', 'U003', 'U003'],
-    'Fo Message Id': ['F001', 'F001', 'F001', 'F002', 'F002', 'F003', 'F003', 'F003', 'F003'],
-    'error_field': ['A', 'B', 'C', 'A', 'C', 'A', 'B', 'D', 'C'],
-    'Report Snapshot Date': pd.date_range(start='2023-01-01', periods=9, freq='H'),
-    'JUR': ['NA', 'NA', 'NA', 'EMEA', 'EMEA', 'ASIA', 'ASIA', 'ASIA', 'ASIA']
-})
+# Load your data
+df = pd.read_csv('your_data.csv')
 
-results = analyze_rejection_clusters(rejection_data)
+# Run analysis and save to Excel
+results = analyze_rejection_clusters(df, output_excel_path='rejection_analysis.xlsx')
 
-# Access the different analysis results
-print("Ordered Clusters (Sequence matters):")
-print(results['ordered_clusters'])
-print("\nUnordered Clusters (Only content matters):")
-print(results['unordered_clusters'])
-print("\nOrdered Clusters by Region:")
-print(results['ordered_regional_matrix'])
-print("\nUnordered Clusters by Region:")
-print(results['unordered_regional_matrix'])
-print("\nRegion-specific Ordered Clusters:")
-for jur, clusters in results['region_specific_ordered'].items():
-    print(f"{jur}: {clusters}")
-print("\nRegion-specific Unordered Clusters:")
-for jur, clusters in results['region_specific_unordered'].items():
-    print(f"{jur}: {clusters}")
+# You can also access any of the individual dataframes
+ordered_clusters_df = results['ordered_clusters']
+unordered_clusters_df = results['unordered_clusters']
+ordered_regional_matrix_df = results['ordered_regional_matrix']
 """
