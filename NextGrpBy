@@ -2,16 +2,22 @@ import pandas as pd
 from collections import Counter
 
 def analyze_rejection_clusters(df):
-    # Ensure data is sorted chronologically within each bundle
-    df = df.sort_values(['Uts id', 'FO id', 'timestamp'])  # Assumes you have a timestamp column
+    # Updated column names
+    # Region -> JUR
+    # Uts id -> Uti Id
+    # FO id -> Fo Message Id
+    # timestamp -> Report Snapshot Date
     
-    # Step 1: Group messages by Uts id and FO id to create bundles
+    # Ensure data is sorted chronologically within each bundle
+    df = df.sort_values(['Uti Id', 'Fo Message Id', 'Report Snapshot Date'])
+    
+    # Step 1: Group messages by Uti Id and Fo Message Id to create bundles
     # For each bundle, collect the sequence of error fields in chronological order
     bundles = []
     
-    for (uts_id, fo_id), group in df.groupby(['Uts id', 'FO id']):
+    for (uti_id, fo_message_id), group in df.groupby(['Uti Id', 'Fo Message Id']):
         error_fields = group['error_field'].tolist()  # Assumes the column with error field is called 'error_field'
-        region = group['region'].iloc[0]  # Get the region for this bundle
+        jur = group['JUR'].iloc[0]  # Get the region (JUR) for this bundle
         
         # Create ordered sequence representation (e.g., 'A -> B -> C')
         ordered_sequence = ' -> '.join(error_fields)
@@ -21,35 +27,35 @@ def analyze_rejection_clusters(df):
         unordered_key = ', '.join(unordered_set)
         
         bundles.append({
-            'Uts id': uts_id,
-            'FO id': fo_id,
+            'Uti Id': uti_id,
+            'Fo Message Id': fo_message_id,
             'ordered_sequence': ordered_sequence,
             'unordered_key': unordered_key,
             'message_count': len(error_fields),
-            'region': region
+            'JUR': jur
         })
     
     # Convert bundles to DataFrame
     bundle_df = pd.DataFrame(bundles)
     
     # Solution 1: Sequence is unique (order matters)
-    ordered_clusters = bundle_df.groupby(['ordered_sequence', 'region']).agg(
-        cluster_count=('Uts id', 'nunique'),
-        fo_count=('FO id', 'nunique'),
+    ordered_clusters = bundle_df.groupby(['ordered_sequence', 'JUR']).agg(
+        cluster_count=('Uti Id', 'nunique'),
+        fo_count=('Fo Message Id', 'nunique'),
         message_count=('message_count', 'first')
     ).reset_index()
     
     # Solution 2: Sequence is not unique (only content matters, not order)
-    unordered_clusters = bundle_df.groupby(['unordered_key', 'region']).agg(
-        cluster_count=('Uts id', 'nunique'),
-        fo_count=('FO id', 'nunique'),
+    unordered_clusters = bundle_df.groupby(['unordered_key', 'JUR']).agg(
+        cluster_count=('Uti Id', 'nunique'),
+        fo_count=('Fo Message Id', 'nunique'),
         message_count=('message_count', 'first')
     ).reset_index()
     
     # Regional analysis for ordered clusters
     ordered_regional_matrix = pd.crosstab(
         ordered_clusters['ordered_sequence'], 
-        ordered_clusters['region'], 
+        ordered_clusters['JUR'], 
         values=ordered_clusters['cluster_count'],
         aggfunc='sum',
         margins=True, 
@@ -59,7 +65,7 @@ def analyze_rejection_clusters(df):
     # Regional analysis for unordered clusters
     unordered_regional_matrix = pd.crosstab(
         unordered_clusters['unordered_key'], 
-        unordered_clusters['region'], 
+        unordered_clusters['JUR'], 
         values=unordered_clusters['cluster_count'],
         aggfunc='sum',
         margins=True, 
@@ -68,27 +74,27 @@ def analyze_rejection_clusters(df):
     
     # Find clusters unique to specific regions (ordered)
     region_specific_ordered = {}
-    for region in ordered_clusters['region'].unique():
+    for jur in ordered_clusters['JUR'].unique():
         # Get clusters that only appear in this region
         region_clusters = ordered_regional_matrix.loc[
-            (ordered_regional_matrix[region] > 0) & 
-            (ordered_regional_matrix.drop(['Total', region], axis=1).sum(axis=1) == 0) &
+            (ordered_regional_matrix[jur] > 0) & 
+            (ordered_regional_matrix.drop(['Total', jur], axis=1).sum(axis=1) == 0) &
             (ordered_regional_matrix.index != 'Total')
         ]
         if not region_clusters.empty:
-            region_specific_ordered[region] = region_clusters.index.tolist()
+            region_specific_ordered[jur] = region_clusters.index.tolist()
     
     # Find clusters unique to specific regions (unordered)
     region_specific_unordered = {}
-    for region in unordered_clusters['region'].unique():
+    for jur in unordered_clusters['JUR'].unique():
         # Get clusters that only appear in this region
         region_clusters = unordered_regional_matrix.loc[
-            (unordered_regional_matrix[region] > 0) & 
-            (unordered_regional_matrix.drop(['Total', region], axis=1).sum(axis=1) == 0) &
+            (unordered_regional_matrix[jur] > 0) & 
+            (unordered_regional_matrix.drop(['Total', jur], axis=1).sum(axis=1) == 0) &
             (unordered_regional_matrix.index != 'Total')
         ]
         if not region_clusters.empty:
-            region_specific_unordered[region] = region_clusters.index.tolist()
+            region_specific_unordered[jur] = region_clusters.index.tolist()
     
     return {
         'ordered_clusters': ordered_clusters,
@@ -103,11 +109,11 @@ def analyze_rejection_clusters(df):
 """
 Assuming your dataframe is structured like:
 rejection_data = pd.DataFrame({
-    'Uts id': ['U001', 'U001', 'U001', 'U002', 'U002', 'U003', 'U003', 'U003', 'U003'],
-    'FO id': ['F001', 'F001', 'F001', 'F002', 'F002', 'F003', 'F003', 'F003', 'F003'],
+    'Uti Id': ['U001', 'U001', 'U001', 'U002', 'U002', 'U003', 'U003', 'U003', 'U003'],
+    'Fo Message Id': ['F001', 'F001', 'F001', 'F002', 'F002', 'F003', 'F003', 'F003', 'F003'],
     'error_field': ['A', 'B', 'C', 'A', 'C', 'A', 'B', 'D', 'C'],
-    'timestamp': pd.date_range(start='2023-01-01', periods=9, freq='H'),
-    'region': ['NA', 'NA', 'NA', 'EMEA', 'EMEA', 'ASIA', 'ASIA', 'ASIA', 'ASIA']
+    'Report Snapshot Date': pd.date_range(start='2023-01-01', periods=9, freq='H'),
+    'JUR': ['NA', 'NA', 'NA', 'EMEA', 'EMEA', 'ASIA', 'ASIA', 'ASIA', 'ASIA']
 })
 
 results = analyze_rejection_clusters(rejection_data)
@@ -122,9 +128,9 @@ print(results['ordered_regional_matrix'])
 print("\nUnordered Clusters by Region:")
 print(results['unordered_regional_matrix'])
 print("\nRegion-specific Ordered Clusters:")
-for region, clusters in results['region_specific_ordered'].items():
-    print(f"{region}: {clusters}")
+for jur, clusters in results['region_specific_ordered'].items():
+    print(f"{jur}: {clusters}")
 print("\nRegion-specific Unordered Clusters:")
-for region, clusters in results['region_specific_unordered'].items():
-    print(f"{region}: {clusters}")
+for jur, clusters in results['region_specific_unordered'].items():
+    print(f"{jur}: {clusters}")
 """
