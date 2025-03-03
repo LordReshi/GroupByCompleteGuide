@@ -1,0 +1,182 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+import os
+
+def analyze_error_clusters(df, output_path):
+    """
+    Analyze error clusters in rejected trades and save results to specified path
+    
+    Parameters:
+    df (pandas.DataFrame): DataFrame containing rejected trades data
+    output_path (str): Path where output files should be saved
+    
+    Returns:
+    pandas.DataFrame: Processed dataframe with error cluster information
+    """
+    # Create output directory if it doesn't exist
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+    
+    # Sort by Snapshot Report Date first
+    df = df.sort_values('Snapshot Report Date')
+    
+    # Group by FO Message ID to identify clusters
+    message_groups = df.groupby('Fo Message Id')
+    
+    # Create clusters by joining error descriptions for each FO Message ID
+    cluster_data = []
+    
+    for message_id, group in message_groups:
+        # Join all unique errors with " -> "
+        error_cluster = " -> ".join(sorted(group['Error Description'].unique()))
+        nack_types_cluster = " -> ".join(sorted(group['NACK Type'].unique()))
+        
+        # Get other relevant information
+        uti_id = group['Uti Id'].iloc[0]  # Get the UTI ID for this group
+        jur = group['JUR'].iloc[0]  # Jurisdiction
+        fo_system = group['FO System'].iloc[0]  # FO System
+        asset_class = group['Asset Class'].iloc[0]  # Asset Class
+        
+        # Get the month from snapshot date
+        snapshot_date = pd.to_datetime(group['Snapshot Report Date'].iloc[0])
+        month = snapshot_date.strftime('%Y-%m')
+        
+        # Count number of errors in this cluster
+        num_errors = len(group['Error Description'].unique())
+        
+        cluster_data.append({
+            'Cluster': error_cluster,
+            'NACK_Types': nack_types_cluster,
+            'Uti_Id': uti_id,
+            'Fo_Message_Id': message_id,
+            'JUR': jur,
+            'FO_System': fo_system,
+            'Asset_Class': asset_class,
+            'Month': month,
+            'Num_Errors': num_errors
+        })
+    
+    # Create dataframe from collected data
+    clusters_df = pd.DataFrame(cluster_data)
+    
+    # Group by the error cluster to get frequency data
+    result = clusters_df.groupby(['Cluster', 'NACK_Types']).agg({
+        'Uti_Id': ['nunique', list],
+        'Fo_Message_Id': ['nunique', list],
+        'Num_Errors': 'first',
+        'JUR': lambda x: dict(pd.Series(x).value_counts()),
+        'FO_System': lambda x: list(set(x)),
+        'Asset_Class': lambda x: list(set(x)),
+        'Month': lambda x: dict(pd.Series(x).value_counts())
+    }).reset_index()
+    
+    # Flatten multi-level column names
+    result.columns = ['Cluster', 'NACK_Types', 'Total_Unique_Uti_Ids', 'Uti_Id_List', 
+                      'Total_Unique_Fo_Message_Ids', 'Fo_Message_Id_List', 'Number_of_Errors',
+                      'JUR_Count', 'FO_Systems', 'Asset_Classes', 'Month_Count']
+    
+    # Sort by frequency of occurrence (descending)
+    result = result.sort_values('Total_Unique_Fo_Message_Ids', ascending=False)
+    
+    # Save the result to Excel
+    excel_path = os.path.join(output_path, 'error_clusters_analysis.xlsx')
+    result.to_excel(excel_path, index=False)
+    print(f"Analysis saved to {excel_path}")
+    
+    # Create and save visualizations
+    create_visualizations(result, clusters_df, output_path)
+    
+    return result
+
+def create_visualizations(result_df, clusters_df, output_path):
+    """
+    Create and save visualizations based on the analysis
+    
+    Parameters:
+    result_df (pandas.DataFrame): The aggregated result dataframe
+    clusters_df (pandas.DataFrame): The intermediate clusters dataframe
+    output_path (str): Path where output files should be saved
+    """
+    # 1. Top 10 most frequent error clusters
+    plt.figure(figsize=(12, 8))
+    top_clusters = result_df.head(10)
+    sns.barplot(x='Total_Unique_Fo_Message_Ids', y='Cluster', data=top_clusters)
+    plt.title('Top 10 Most Frequent Error Clusters')
+    plt.xlabel('Frequency (Number of Occurrences)')
+    plt.ylabel('Error Cluster')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'top_error_clusters.png'), dpi=300)
+    plt.close()
+    
+    # 2. Distribution of errors by NACK Type
+    plt.figure(figsize=(10, 6))
+    nack_counts = clusters_df['NACK_Types'].value_counts().head(10)
+    sns.barplot(x=nack_counts.values, y=nack_counts.index)
+    plt.title('Top 10 NACK Types Distribution')
+    plt.xlabel('Count')
+    plt.ylabel('NACK Type')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'nack_type_distribution.png'), dpi=300)
+    plt.close()
+    
+    # 3. Monthly trend of errors
+    monthly_data = clusters_df['Month'].value_counts().sort_index()
+    plt.figure(figsize=(10, 6))
+    sns.lineplot(x=monthly_data.index, y=monthly_data.values, marker='o')
+    plt.title('Monthly Trend of Errors (Oct 2024 - Jan 2025)')
+    plt.xlabel('Month')
+    plt.ylabel('Number of Error Occurrences')
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'monthly_error_trend.png'), dpi=300)
+    plt.close()
+    
+    # 4. Distribution by Jurisdiction
+    jur_counts = clusters_df['JUR'].value_counts()
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x=jur_counts.values, y=jur_counts.index)
+    plt.title('Error Distribution by Jurisdiction')
+    plt.xlabel('Count')
+    plt.ylabel('Jurisdiction')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'jurisdiction_distribution.png'), dpi=300)
+    plt.close()
+    
+    # 5. Distribution by Asset Class
+    asset_counts = clusters_df['Asset_Class'].value_counts()
+    plt.figure(figsize=(10, 6))
+    plt.pie(asset_counts.values, labels=asset_counts.index, autopct='%1.1f%%', startangle=90)
+    plt.title('Error Distribution by Asset Class')
+    plt.axis('equal')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'asset_class_distribution.png'), dpi=300)
+    plt.close()
+    
+    # 6. Error complexity (number of errors in cluster)
+    plt.figure(figsize=(10, 6))
+    sns.histplot(result_df['Number_of_Errors'], bins=10, kde=True)
+    plt.title('Distribution of Error Complexity (Number of Errors in Cluster)')
+    plt.xlabel('Number of Errors in Cluster')
+    plt.ylabel('Frequency')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'error_complexity.png'), dpi=300)
+    plt.close()
+    
+    # 7. Heatmap of Asset Class vs NACK Type
+    cross_tab = pd.crosstab(clusters_df['Asset_Class'], clusters_df['NACK_Types'])
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(cross_tab, annot=True, cmap='YlGnBu', fmt='d')
+    plt.title('Heatmap of Asset Class vs NACK Type')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'asset_vs_nack_heatmap.png'), dpi=300)
+    plt.close()
+    
+    print(f"All visualizations saved to {output_path}")
+
+# Example usage:
+# df = pd.read_csv('your_data_file.csv')
+# output_path = '/path/to/output/directory'
+# result = analyze_error_clusters(df, output_path)
