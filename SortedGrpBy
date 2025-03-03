@@ -1,491 +1,182 @@
 import pandas as pd
 import numpy as np
-from collections import Counter
-from datetime import datetime
-import os
 import matplotlib.pyplot as plt
 import seaborn as sns
+from datetime import datetime
+import os
 
-def analyze_error_clusters(df, save_path=None):
+def analyze_error_clusters(df, output_path):
     """
-    Analyze clusters of errors based on Fo Message Id and count their occurrences
-    across different dimensions, with additional fields for NACK Type, FO System, and Asset Class.
+    Analyze error clusters in rejected trades and save results to specified path
     
     Parameters:
-    -----------
-    df : pandas.DataFrame
-        DataFrame containing the trade rejection data with columns:
-        Uti Id, Error Description, Fo Message Id, JUR, Snapshot Report Date, 
-        NACK Type, FO System, Asset Class, Product Type
-    save_path : str, optional
-        Directory path where to save the results DataFrame. If None, DataFrame is only returned.
+    df (pandas.DataFrame): DataFrame containing rejected trades data
+    output_path (str): Path where output files should be saved
     
     Returns:
-    --------
-    pandas.DataFrame
-        DataFrame with error clusters and their statistics
+    pandas.DataFrame: Processed dataframe with error cluster information
     """
-    # Make a copy to avoid modifying the original
-    df = df.copy()
+    # Create output directory if it doesn't exist
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
     
-    # Convert date column to datetime and sort
-    df['Snapshot Report Date'] = pd.to_datetime(df['Snapshot Report Date'])
+    # Sort by Snapshot Report Date first
     df = df.sort_values('Snapshot Report Date')
     
-    # Extract month from Snapshot Report Date for monthly breakdown
-    df['Month'] = df['Snapshot Report Date'].dt.strftime('%b-%Y')
-    
-    # Group errors by Fo Message Id to find clusters
+    # Group by FO Message ID to identify clusters
     message_groups = df.groupby('Fo Message Id')
     
-    # Dictionary to store cluster information
-    clusters = {}
+    # Create clusters by joining error descriptions for each FO Message ID
+    cluster_data = []
     
-    for fo_msg_id, group in message_groups:
-        # Get the sorted list of unique error descriptions for this message ID
-        errors = sorted(group['Error Description'].unique())
+    for message_id, group in message_groups:
+        # Join all unique errors with " -> "
+        error_cluster = " -> ".join(sorted(group['Error Description'].unique()))
+        nack_types_cluster = " -> ".join(sorted(group['NACK Type'].unique()))
         
-        # Get the sorted list of unique NACK Types for this message ID
-        nack_types = sorted(group['NACK Type'].unique())
+        # Get other relevant information
+        uti_id = group['Uti Id'].iloc[0]  # Get the UTI ID for this group
+        jur = group['JUR'].iloc[0]  # Jurisdiction
+        fo_system = group['FO System'].iloc[0]  # FO System
+        asset_class = group['Asset Class'].iloc[0]  # Asset Class
         
-        # Create cluster keys
-        error_cluster_key = ' -> '.join(errors)
-        nack_type_cluster_key = ' -> '.join(nack_types)
+        # Get the month from snapshot date
+        snapshot_date = pd.to_datetime(group['Snapshot Report Date'].iloc[0])
+        month = snapshot_date.strftime('%Y-%m')
         
-        # Get the unique UTI ID, JUR, and other fields for this message
-        uti_id = group['Uti Id'].iloc[0]
-        jur = group['JUR'].iloc[0]
-        month = group['Month'].iloc[0]
-        fo_systems = group['FO System'].unique()
-        asset_classes = group['Asset Class'].unique()
-        product_type = group['Product Type'].iloc[0] if 'Product Type' in group.columns else 'Unknown'
+        # Count number of errors in this cluster
+        num_errors = len(group['Error Description'].unique())
         
-        # Create a combined key for the cluster (errors + NACK types)
-        combined_key = f"{error_cluster_key} || NACK Types: {nack_type_cluster_key}"
-        
-        # Initialize cluster if not seen before
-        if combined_key not in clusters:
-            clusters[combined_key] = {
-                'uti_ids': set(),
-                'fo_msg_ids': set(),
-                'error_count': len(errors),
-                'nack_type_count': len(nack_types),
-                'jur_counts': Counter(),
-                'month_counts': Counter(),
-                'product_counts': Counter(),
-                'fo_systems': set(),
-                'asset_classes': set()
-            }
-        
-        # Update cluster information
-        clusters[combined_key]['uti_ids'].add(uti_id)
-        clusters[combined_key]['fo_msg_ids'].add(fo_msg_id)
-        clusters[combined_key]['jur_counts'][jur] += 1
-        clusters[combined_key]['month_counts'][month] += 1
-        clusters[combined_key]['product_counts'][product_type] += 1
-        clusters[combined_key]['fo_systems'].update(fo_systems)
-        clusters[combined_key]['asset_classes'].update(asset_classes)
-    
-    # Convert to DataFrame
-    result = []
-    for cluster, stats in clusters.items():
-        # Format the JUR counts
-        jur_counts_str = ', '.join([f"{jur}: {count}" for jur, count in stats['jur_counts'].items()])
-        
-        # Format the month counts
-        month_counts_str = ', '.join([f"{month}: {count}" for month, count in sorted(
-            stats['month_counts'].items(), 
-            key=lambda x: datetime.strptime(x[0], '%b-%Y')
-        )])
-        
-        # Format the product counts
-        product_counts_str = ', '.join([f"{product}: {count}" for product, count in stats['product_counts'].items()])
-        
-        # Format FO Systems and Asset Classes
-        fo_systems_str = ', '.join(sorted(stats['fo_systems']))
-        asset_classes_str = ', '.join(sorted(stats['asset_classes']))
-        
-        result.append({
-            'Cluster': cluster,
-            'Total_Unique_Uti_Ids': len(stats['uti_ids']),
-            'Total_Unique_Fo_Message_Ids': len(stats['fo_msg_ids']),
-            'Number_of_Errors': stats['error_count'],
-            'Number_of_NACK_Types': stats['nack_type_count'],
-            'JUR_Breakdown': jur_counts_str,
-            'Month_Breakdown': month_counts_str,
-            'Product_Breakdown': product_counts_str,
-            'FO_Systems': fo_systems_str,
-            'Asset_Classes': asset_classes_str
+        cluster_data.append({
+            'Cluster': error_cluster,
+            'NACK_Types': nack_types_cluster,
+            'Uti_Id': uti_id,
+            'Fo_Message_Id': message_id,
+            'JUR': jur,
+            'FO_System': fo_system,
+            'Asset_Class': asset_class,
+            'Month': month,
+            'Num_Errors': num_errors
         })
     
-    # Convert to DataFrame and sort by frequency (Total Unique Fo Message Ids)
-    result_df = pd.DataFrame(result)
-    result_df = result_df.sort_values('Total_Unique_Fo_Message_Ids', ascending=False)
+    # Create dataframe from collected data
+    clusters_df = pd.DataFrame(cluster_data)
     
-    # Save DataFrame if path is provided
-    if save_path:
-        # Create directory if it doesn't exist
-        os.makedirs(save_path, exist_ok=True)
-        
-        # Save DataFrame as CSV
-        csv_path = os.path.join(save_path, 'error_clusters_analysis.csv')
-        result_df.to_csv(csv_path, index=False)
-        print(f"DataFrame saved to: {csv_path}")
-        
-        # Save DataFrame as Excel for better formatting
-        excel_path = os.path.join(save_path, 'error_clusters_analysis.xlsx')
-        result_df.to_excel(excel_path, index=False)
-        print(f"DataFrame saved to: {excel_path}")
+    # Group by the error cluster to get frequency data
+    result = clusters_df.groupby(['Cluster', 'NACK_Types']).agg({
+        'Uti_Id': ['nunique', list],
+        'Fo_Message_Id': ['nunique', list],
+        'Num_Errors': 'first',
+        'JUR': lambda x: dict(pd.Series(x).value_counts()),
+        'FO_System': lambda x: list(set(x)),
+        'Asset_Class': lambda x: list(set(x)),
+        'Month': lambda x: dict(pd.Series(x).value_counts())
+    }).reset_index()
     
-    return result_df
+    # Flatten multi-level column names
+    result.columns = ['Cluster', 'NACK_Types', 'Total_Unique_Uti_Ids', 'Uti_Id_List', 
+                      'Total_Unique_Fo_Message_Ids', 'Fo_Message_Id_List', 'Number_of_Errors',
+                      'JUR_Count', 'FO_Systems', 'Asset_Classes', 'Month_Count']
+    
+    # Sort by frequency of occurrence (descending)
+    result = result.sort_values('Total_Unique_Fo_Message_Ids', ascending=False)
+    
+    # Save the result to Excel
+    excel_path = os.path.join(output_path, 'error_clusters_analysis.xlsx')
+    result.to_excel(excel_path, index=False)
+    print(f"Analysis saved to {excel_path}")
+    
+    # Create and save visualizations
+    create_visualizations(result, clusters_df, output_path)
+    
+    return result
 
-def visualize_top_clusters(cluster_df, top_n=10, save_path=None):
+def create_visualizations(result_df, clusters_df, output_path):
     """
-    Visualize the top N most frequent error clusters with enhanced metrics.
+    Create and save visualizations based on the analysis
     
     Parameters:
-    -----------
-    cluster_df : pandas.DataFrame
-        DataFrame with cluster analysis results
-    top_n : int
-        Number of top clusters to visualize
-    save_path : str, optional
-        Directory path where to save the visualization files. If None, plots are only displayed.
-    
-    Returns:
-    --------
-    None (creates visualizations)
+    result_df (pandas.DataFrame): The aggregated result dataframe
+    clusters_df (pandas.DataFrame): The intermediate clusters dataframe
+    output_path (str): Path where output files should be saved
     """
-    # Create directory if save_path is provided and doesn't exist
-    if save_path:
-        os.makedirs(save_path, exist_ok=True)
-    
-    # Get top N clusters
-    top_clusters = cluster_df.head(top_n).copy()
-    
-    # For cleaner visualization, abbreviate long cluster names
-    top_clusters['Cluster_Short'] = top_clusters['Cluster'].apply(
-        lambda x: x.split(' || NACK Types:')[0][:30] + '...' if len(x) > 30 else x)
-    
-    # Plot top clusters by frequency
+    # 1. Top 10 most frequent error clusters
     plt.figure(figsize=(12, 8))
-    sns.barplot(x='Total_Unique_Fo_Message_Ids', y='Cluster_Short', data=top_clusters)
-    plt.title(f'Top {top_n} Most Frequent Error Clusters')
-    plt.xlabel('Frequency (Total Unique Fo Message Ids)')
+    top_clusters = result_df.head(10)
+    sns.barplot(x='Total_Unique_Fo_Message_Ids', y='Cluster', data=top_clusters)
+    plt.title('Top 10 Most Frequent Error Clusters')
+    plt.xlabel('Frequency (Number of Occurrences)')
     plt.ylabel('Error Cluster')
     plt.tight_layout()
-    
-    # Save or display the plot
-    if save_path:
-        plt_path = os.path.join(save_path, 'top_error_clusters.png')
-        plt.savefig(plt_path, dpi=300)
-        print(f"Top clusters plot saved to: {plt_path}")
-    else:
-        plt.show()
+    plt.savefig(os.path.join(output_path, 'top_error_clusters.png'), dpi=300)
     plt.close()
     
-    # Extract JUR data for top clusters for heatmap
-    jur_data = {}
-    for _, row in top_clusters.iterrows():
-        cluster = row['Cluster_Short']
-        jur_counts = {}
-        
-        if row['JUR_Breakdown']:
-            for jur_item in row['JUR_Breakdown'].split(','):
-                if ':' in jur_item:
-                    jur, count = jur_item.split(':')
-                    jur_counts[jur.strip()] = int(count.strip())
-        
-        jur_data[cluster] = jur_counts
+    # 2. Distribution of errors by NACK Type
+    plt.figure(figsize=(10, 6))
+    nack_counts = clusters_df['NACK_Types'].value_counts().head(10)
+    sns.barplot(x=nack_counts.values, y=nack_counts.index)
+    plt.title('Top 10 NACK Types Distribution')
+    plt.xlabel('Count')
+    plt.ylabel('NACK Type')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'nack_type_distribution.png'), dpi=300)
+    plt.close()
     
-    # Convert to DataFrame for heatmap
-    jur_df = pd.DataFrame(jur_data).T.fillna(0)
+    # 3. Monthly trend of errors
+    monthly_data = clusters_df['Month'].value_counts().sort_index()
+    plt.figure(figsize=(10, 6))
+    sns.lineplot(x=monthly_data.index, y=monthly_data.values, marker='o')
+    plt.title('Monthly Trend of Errors (Oct 2024 - Jan 2025)')
+    plt.xlabel('Month')
+    plt.ylabel('Number of Error Occurrences')
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'monthly_error_trend.png'), dpi=300)
+    plt.close()
     
-    # Only create heatmap if there's data
-    if not jur_df.empty and jur_df.shape[1] > 0:
-        # Plot heatmap of clusters by jurisdiction
-        plt.figure(figsize=(12, 8))
-        sns.heatmap(jur_df, annot=True, cmap='YlGnBu', fmt='g')
-        plt.title('Distribution of Top Error Clusters by Jurisdiction')
-        plt.tight_layout()
-        
-        # Save or display the plot
-        if save_path:
-            heatmap_path = os.path.join(save_path, 'cluster_jur_heatmap.png')
-            plt.savefig(heatmap_path, dpi=300)
-            print(f"Jurisdiction heatmap saved to: {heatmap_path}")
-        else:
-            plt.show()
-        plt.close()
+    # 4. Distribution by Jurisdiction
+    jur_counts = clusters_df['JUR'].value_counts()
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x=jur_counts.values, y=jur_counts.index)
+    plt.title('Error Distribution by Jurisdiction')
+    plt.xlabel('Count')
+    plt.ylabel('Jurisdiction')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'jurisdiction_distribution.png'), dpi=300)
+    plt.close()
     
-    # Plot Asset Class distribution
-    asset_class_data = []
-    for _, row in top_clusters.iterrows():
-        cluster = row['Cluster_Short']
-        if row['Asset_Classes']:
-            asset_classes = row['Asset_Classes'].split(', ')
-            for ac in asset_classes:
-                if ac:  # Only add non-empty asset classes
-                    asset_class_data.append({'Cluster': cluster, 'Asset Class': ac})
+    # 5. Distribution by Asset Class
+    asset_counts = clusters_df['Asset_Class'].value_counts()
+    plt.figure(figsize=(10, 6))
+    plt.pie(asset_counts.values, labels=asset_counts.index, autopct='%1.1f%%', startangle=90)
+    plt.title('Error Distribution by Asset Class')
+    plt.axis('equal')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'asset_class_distribution.png'), dpi=300)
+    plt.close()
     
-    # Only create asset class plot if there's data
-    if asset_class_data:
-        asset_class_df = pd.DataFrame(asset_class_data)
-        
-        plt.figure(figsize=(12, 8))
-        sns.countplot(y='Asset Class', hue='Cluster', data=asset_class_df)
-        plt.title('Asset Class Distribution in Top Error Clusters')
-        plt.tight_layout()
-        
-        # Save or display the plot
-        if save_path:
-            asset_plot_path = os.path.join(save_path, 'asset_class_distribution.png')
-            plt.savefig(asset_plot_path, dpi=300)
-            print(f"Asset class distribution plot saved to: {asset_plot_path}")
-        else:
-            plt.show()
-        plt.close()
+    # 6. Error complexity (number of errors in cluster)
+    plt.figure(figsize=(10, 6))
+    sns.histplot(result_df['Number_of_Errors'], bins=10, kde=True)
+    plt.title('Distribution of Error Complexity (Number of Errors in Cluster)')
+    plt.xlabel('Number of Errors in Cluster')
+    plt.ylabel('Frequency')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'error_complexity.png'), dpi=300)
+    plt.close()
+    
+    # 7. Heatmap of Asset Class vs NACK Type
+    cross_tab = pd.crosstab(clusters_df['Asset_Class'], clusters_df['NACK_Types'])
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(cross_tab, annot=True, cmap='YlGnBu', fmt='d')
+    plt.title('Heatmap of Asset Class vs NACK Type')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, 'asset_vs_nack_heatmap.png'), dpi=300)
+    plt.close()
+    
+    print(f"All visualizations saved to {output_path}")
 
-def analyze_error_by_dimension(df, dimension='Asset Class', top_n=5, save_path=None):
-    """
-    Analyze error patterns across a specific dimension (Asset Class, FO System, etc.)
-    
-    Parameters:
-    -----------
-    df : pandas.DataFrame
-        DataFrame containing the trade rejection data
-    dimension : str
-        The column to analyze errors by
-    top_n : int
-        Number of top errors to display for each category
-    save_path : str, optional
-        Directory path where to save the results. If None, results are only returned.
-        
-    Returns:
-    --------
-    dict
-        Dictionary with dimension categories as keys and their top errors as values
-    """
-    dimension_groups = df.groupby(dimension)
-    dimension_analysis = {}
-    
-    for dim_value, group in dimension_groups:
-        # Count error frequencies
-        error_counts = group['Error Description'].value_counts().head(top_n)
-        
-        # Count NACK type frequencies
-        nack_counts = group['NACK Type'].value_counts().head(top_n)
-        
-        dimension_analysis[dim_value] = {
-            'total_rejections': len(group),
-            'unique_uti_ids': group['Uti Id'].nunique(),
-            'unique_fo_msg_ids': group['Fo Message Id'].nunique(),
-            'top_errors': error_counts.to_dict(),
-            'top_nack_types': nack_counts.to_dict(),
-            'jur_distribution': group['JUR'].value_counts().to_dict()
-        }
-    
-    # Save analysis if path is provided
-    if save_path:
-        # Create directory if it doesn't exist
-        os.makedirs(save_path, exist_ok=True)
-        
-        # Convert to DataFrame format for better viewing
-        result_rows = []
-        for dim_value, stats in dimension_analysis.items():
-            base_row = {
-                dimension: dim_value,
-                'Total_Rejections': stats['total_rejections'],
-                'Unique_UTI_IDs': stats['unique_uti_ids'],
-                'Unique_FO_Msg_IDs': stats['unique_fo_msg_ids']
-            }
-            
-            # Add top errors
-            for i, (error, count) in enumerate(stats['top_errors'].items(), 1):
-                base_row[f'Top_Error_{i}'] = error
-                base_row[f'Top_Error_{i}_Count'] = count
-            
-            # Add top NACK types
-            for i, (nack, count) in enumerate(stats['top_nack_types'].items(), 1):
-                base_row[f'Top_NACK_{i}'] = nack
-                base_row[f'Top_NACK_{i}_Count'] = count
-            
-            result_rows.append(base_row)
-        
-        result_df = pd.DataFrame(result_rows)
-        
-        # Save as CSV and Excel
-        csv_path = os.path.join(save_path, f'analysis_by_{dimension.lower().replace(" ", "_")}.csv')
-        result_df.to_csv(csv_path, index=False)
-        print(f"Analysis by {dimension} saved to: {csv_path}")
-        
-        excel_path = os.path.join(save_path, f'analysis_by_{dimension.lower().replace(" ", "_")}.xlsx')
-        result_df.to_excel(excel_path, index=False)
-        print(f"Analysis by {dimension} saved to: {excel_path}")
-        
-        # Create visualizations
-        plt.figure(figsize=(12, 8))
-        sns.barplot(x=dimension, y='Total_Rejections', data=result_df)
-        plt.title(f'Total Rejections by {dimension}')
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        
-        plot_path = os.path.join(save_path, f'rejections_by_{dimension.lower().replace(" ", "_")}.png')
-        plt.savefig(plot_path, dpi=300)
-        print(f"Plot saved to: {plot_path}")
-        plt.close()
-    
-    return dimension_analysis
-
-def create_summary_report(df, cluster_df, top_n=10, save_path=None):
-    """
-    Create a comprehensive summary report of the error analysis
-    
-    Parameters:
-    -----------
-    df : pandas.DataFrame
-        Original DataFrame containing the trade rejection data
-    cluster_df : pandas.DataFrame
-        DataFrame with cluster analysis results
-    top_n : int
-        Number of top items to include in each category
-    save_path : str, optional
-        Directory path where to save the report. If None, report is only returned.
-        
-    Returns:
-    --------
-    str
-        Markdown formatted summary report
-    """
-    report = "# Error Cluster Analysis Summary Report\n\n"
-    
-    # Overall statistics
-    report += "## Overall Statistics\n\n"
-    report += f"- Total Rejections: {len(df)}\n"
-    report += f"- Unique Trades (UTI IDs): {df['Uti Id'].nunique()}\n"
-    report += f"- Unique Message IDs: {df['Fo Message Id'].nunique()}\n"
-    report += f"- Unique Error Types: {df['Error Description'].nunique()}\n"
-    report += f"- Unique NACK Types: {df['NACK Type'].nunique()}\n"
-    report += f"- Jurisdictions: {', '.join(df['JUR'].unique())}\n"
-    report += f"- Asset Classes: {', '.join(df['Asset Class'].unique())}\n"
-    report += f"- FO Systems: {', '.join(df['FO System'].unique())}\n\n"
-    
-    # Top error clusters
-    report += "## Top Error Clusters\n\n"
-    report += "| Cluster | Frequency | Affected Trades | JURs | Asset Classes |\n"
-    report += "|---------|-----------|----------------|------|---------------|\n"
-    
-    for _, row in cluster_df.head(top_n).iterrows():
-        cluster_short = row['Cluster'].split(' || NACK Types:')[0][:50] + '...' if len(row['Cluster']) > 50 else row['Cluster']
-        report += f"| {cluster_short} | {row['Total_Unique_Fo_Message_Ids']} | {row['Total_Unique_Uti_Ids']} | {row['JUR_Breakdown']} | {row['Asset_Classes']} |\n"
-    
-    report += "\n"
-    
-    # Monthly trend
-    report += "## Monthly Trend\n\n"
-    monthly_counts = df.groupby(df['Snapshot Report Date'].dt.strftime('%b-%Y'))['Fo Message Id'].nunique()
-    for month, count in sorted(monthly_counts.items(), key=lambda x: datetime.strptime(x[0], '%b-%Y')):
-        report += f"- {month}: {count} rejections\n"
-    
-    report += "\n"
-    
-    # Save report if path is provided
-    if save_path:
-        # Create directory if it doesn't exist
-        os.makedirs(save_path, exist_ok=True)
-        
-        report_path = os.path.join(save_path, 'error_analysis_report.md')
-        with open(report_path, 'w') as f:
-            f.write(report)
-        print(f"Summary report saved to: {report_path}")
-        
-        # Also save as HTML for better viewing
-        try:
-            import markdown
-            html = markdown.markdown(report)
-            html_path = os.path.join(save_path, 'error_analysis_report.html')
-            with open(html_path, 'w') as f:
-                f.write(f"""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>Error Analysis Report</title>
-                    <style>
-                        body {{ font-family: Arial, sans-serif; line-height: 1.6; max-width: 1000px; margin: 0 auto; padding: 20px; }}
-                        table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
-                        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-                        th {{ background-color: #f2f2f2; }}
-                        tr:nth-child(even) {{ background-color: #f9f9f9; }}
-                    </style>
-                </head>
-                <body>
-                    {html}
-                </body>
-                </html>
-                """)
-            print(f"HTML report saved to: {html_path}")
-        except ImportError:
-            print("Python 'markdown' package not installed. HTML report not generated.")
-    
-    return report
-
-def run_full_analysis(df, output_path, top_n=10):
-    """
-    Run the complete error analysis pipeline and save all outputs to the specified path
-    
-    Parameters:
-    -----------
-    df : pandas.DataFrame
-        DataFrame containing the trade rejection data
-    output_path : str
-        Directory path where to save all outputs
-    top_n : int
-        Number of top items to include in analyses and visualizations
-    
-    Returns:
-    --------
-    pandas.DataFrame
-        The main error clusters analysis DataFrame
-    """
-    print(f"Starting error cluster analysis, saving results to: {output_path}")
-    
-    # Create main output directory
-    os.makedirs(output_path, exist_ok=True)
-    
-    # 1. Analyze error clusters
-    clusters_path = os.path.join(output_path, 'clusters')
-    cluster_df = analyze_error_clusters(df, save_path=clusters_path)
-    
-    # 2. Visualize top clusters
-    viz_path = os.path.join(output_path, 'visualizations')
-    visualize_top_clusters(cluster_df, top_n=top_n, save_path=viz_path)
-    
-    # 3. Analyze by dimensions
-    dimensions_path = os.path.join(output_path, 'dimensions')
-    
-    # Analysis by Asset Class
-    asset_class_path = os.path.join(dimensions_path, 'asset_class')
-    analyze_error_by_dimension(df, dimension='Asset Class', top_n=top_n, save_path=asset_class_path)
-    
-    # Analysis by FO System
-    fo_system_path = os.path.join(dimensions_path, 'fo_system')
-    analyze_error_by_dimension(df, dimension='FO System', top_n=top_n, save_path=fo_system_path)
-    
-    # Analysis by JUR
-    jur_path = os.path.join(dimensions_path, 'jurisdiction')
-    analyze_error_by_dimension(df, dimension='JUR', top_n=top_n, save_path=jur_path)
-    
-    # 4. Create summary report
-    report_path = os.path.join(output_path, 'reports')
-    create_summary_report(df, cluster_df, top_n=top_n, save_path=report_path)
-    
-    print(f"Analysis complete. All results saved to: {output_path}")
-    
-    return cluster_df
-
-# Example usage
-# df = pd.read_csv('trade_rejection_data.csv')
-# output_path = '/path/to/your/output/directory'
-# cluster_df = run_full_analysis(df, output_path)
+# Example usage:
+# df = pd.read_csv('your_data_file.csv')
+# output_path = '/path/to/output/directory'
+# result = analyze_error_clusters(df, output_path)
