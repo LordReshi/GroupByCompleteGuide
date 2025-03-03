@@ -1,0 +1,289 @@
+import pandas as pd
+import numpy as np
+from collections import Counter
+from datetime import datetime
+
+def analyze_error_clusters(df):
+    """
+    Analyze clusters of errors based on Fo Message Id and count their occurrences
+    across different dimensions, with additional fields for NACK Type, FO System, and Asset Class.
+    
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        DataFrame containing the trade rejection data with columns:
+        Uti Id, Error Description, Fo Message Id, JUR, Snapshot Report Date, 
+        NACK Type, FO System, Asset Class, Product Type
+    
+    Returns:
+    --------
+    pandas.DataFrame
+        DataFrame with error clusters and their statistics
+    """
+    # Make a copy to avoid modifying the original
+    df = df.copy()
+    
+    # Convert date column to datetime and sort
+    df['Snapshot Report Date'] = pd.to_datetime(df['Snapshot Report Date'])
+    df = df.sort_values('Snapshot Report Date')
+    
+    # Extract month from Snapshot Report Date for monthly breakdown
+    df['Month'] = df['Snapshot Report Date'].dt.strftime('%b-%Y')
+    
+    # Group errors by Fo Message Id to find clusters
+    message_groups = df.groupby('Fo Message Id')
+    
+    # Dictionary to store cluster information
+    clusters = {}
+    
+    for fo_msg_id, group in message_groups:
+        # Get the sorted list of unique error descriptions for this message ID
+        errors = sorted(group['Error Description'].unique())
+        
+        # Get the sorted list of unique NACK Types for this message ID
+        nack_types = sorted(group['NACK Type'].unique())
+        
+        # Create cluster keys
+        error_cluster_key = ' -> '.join(errors)
+        nack_type_cluster_key = ' -> '.join(nack_types)
+        
+        # Get the unique UTI ID, JUR, and other fields for this message
+        uti_id = group['Uti Id'].iloc[0]
+        jur = group['JUR'].iloc[0]
+        month = group['Month'].iloc[0]
+        fo_systems = group['FO System'].unique()
+        asset_classes = group['Asset Class'].unique()
+        product_type = group['Product Type'].iloc[0] if 'Product Type' in group.columns else 'Unknown'
+        
+        # Create a combined key for the cluster (errors + NACK types)
+        combined_key = f"{error_cluster_key} || NACK Types: {nack_type_cluster_key}"
+        
+        # Initialize cluster if not seen before
+        if combined_key not in clusters:
+            clusters[combined_key] = {
+                'uti_ids': set(),
+                'fo_msg_ids': set(),
+                'error_count': len(errors),
+                'nack_type_count': len(nack_types),
+                'jur_counts': Counter(),
+                'month_counts': Counter(),
+                'product_counts': Counter(),
+                'fo_systems': set(),
+                'asset_classes': set()
+            }
+        
+        # Update cluster information
+        clusters[combined_key]['uti_ids'].add(uti_id)
+        clusters[combined_key]['fo_msg_ids'].add(fo_msg_id)
+        clusters[combined_key]['jur_counts'][jur] += 1
+        clusters[combined_key]['month_counts'][month] += 1
+        clusters[combined_key]['product_counts'][product_type] += 1
+        clusters[combined_key]['fo_systems'].update(fo_systems)
+        clusters[combined_key]['asset_classes'].update(asset_classes)
+    
+    # Convert to DataFrame
+    result = []
+    for cluster, stats in clusters.items():
+        # Format the JUR counts
+        jur_counts_str = ', '.join([f"{jur}: {count}" for jur, count in stats['jur_counts'].items()])
+        
+        # Format the month counts
+        month_counts_str = ', '.join([f"{month}: {count}" for month, count in sorted(
+            stats['month_counts'].items(), 
+            key=lambda x: datetime.strptime(x[0], '%b-%Y')
+        )])
+        
+        # Format the product counts
+        product_counts_str = ', '.join([f"{product}: {count}" for product, count in stats['product_counts'].items()])
+        
+        # Format FO Systems and Asset Classes
+        fo_systems_str = ', '.join(sorted(stats['fo_systems']))
+        asset_classes_str = ', '.join(sorted(stats['asset_classes']))
+        
+        result.append({
+            'Cluster': cluster,
+            'Total_Unique_Uti_Ids': len(stats['uti_ids']),
+            'Total_Unique_Fo_Message_Ids': len(stats['fo_msg_ids']),
+            'Number_of_Errors': stats['error_count'],
+            'Number_of_NACK_Types': stats['nack_type_count'],
+            'JUR_Breakdown': jur_counts_str,
+            'Month_Breakdown': month_counts_str,
+            'Product_Breakdown': product_counts_str,
+            'FO_Systems': fo_systems_str,
+            'Asset_Classes': asset_classes_str
+        })
+    
+    # Convert to DataFrame and sort by frequency (Total Unique Fo Message Ids)
+    result_df = pd.DataFrame(result)
+    result_df = result_df.sort_values('Total_Unique_Fo_Message_Ids', ascending=False)
+    
+    return result_df
+
+def visualize_top_clusters(cluster_df, top_n=10):
+    """
+    Visualize the top N most frequent error clusters with enhanced metrics.
+    
+    Parameters:
+    -----------
+    cluster_df : pandas.DataFrame
+        DataFrame with cluster analysis results
+    top_n : int
+        Number of top clusters to visualize
+    
+    Returns:
+    --------
+    None (creates visualizations)
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    # Get top N clusters
+    top_clusters = cluster_df.head(top_n).copy()
+    
+    # For cleaner visualization, abbreviate long cluster names
+    top_clusters['Cluster_Short'] = top_clusters['Cluster'].apply(
+        lambda x: x.split(' || NACK Types:')[0][:30] + '...' if len(x) > 30 else x)
+    
+    # Plot top clusters by frequency
+    plt.figure(figsize=(12, 8))
+    sns.barplot(x='Total_Unique_Fo_Message_Ids', y='Cluster_Short', data=top_clusters)
+    plt.title(f'Top {top_n} Most Frequent Error Clusters')
+    plt.xlabel('Frequency (Total Unique Fo Message Ids)')
+    plt.ylabel('Error Cluster')
+    plt.tight_layout()
+    plt.savefig('top_error_clusters.png')
+    
+    # Extract JUR data for top clusters for heatmap
+    jur_data = {}
+    for _, row in top_clusters.iterrows():
+        cluster = row['Cluster_Short']
+        jur_counts = {jur.split(':')[0].strip(): int(jur.split(':')[1].strip()) 
+                     for jur in row['JUR_Breakdown'].split(',')}
+        jur_data[cluster] = jur_counts
+    
+    # Convert to DataFrame for heatmap
+    jur_df = pd.DataFrame(jur_data).T.fillna(0)
+    
+    # Plot heatmap of clusters by jurisdiction
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(jur_df, annot=True, cmap='YlGnBu', fmt='g')
+    plt.title('Distribution of Top Error Clusters by Jurisdiction')
+    plt.tight_layout()
+    plt.savefig('cluster_jur_heatmap.png')
+    
+    # Plot Asset Class distribution
+    asset_class_data = []
+    for _, row in top_clusters.iterrows():
+        cluster = row['Cluster_Short']
+        asset_classes = row['Asset_Classes'].split(', ')
+        for ac in asset_classes:
+            asset_class_data.append({'Cluster': cluster, 'Asset Class': ac})
+    
+    asset_class_df = pd.DataFrame(asset_class_data)
+    
+    plt.figure(figsize=(12, 8))
+    sns.countplot(y='Asset Class', hue='Cluster', data=asset_class_df)
+    plt.title('Asset Class Distribution in Top Error Clusters')
+    plt.tight_layout()
+    plt.savefig('asset_class_distribution.png')
+
+def analyze_error_by_dimension(df, dimension='Asset Class', top_n=5):
+    """
+    Analyze error patterns across a specific dimension (Asset Class, FO System, etc.)
+    
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        DataFrame containing the trade rejection data
+    dimension : str
+        The column to analyze errors by
+    top_n : int
+        Number of top errors to display for each category
+        
+    Returns:
+    --------
+    dict
+        Dictionary with dimension categories as keys and their top errors as values
+    """
+    dimension_groups = df.groupby(dimension)
+    dimension_analysis = {}
+    
+    for dim_value, group in dimension_groups:
+        # Count error frequencies
+        error_counts = group['Error Description'].value_counts().head(top_n)
+        
+        # Count NACK type frequencies
+        nack_counts = group['NACK Type'].value_counts().head(top_n)
+        
+        dimension_analysis[dim_value] = {
+            'total_rejections': len(group),
+            'unique_uti_ids': group['Uti Id'].nunique(),
+            'unique_fo_msg_ids': group['Fo Message Id'].nunique(),
+            'top_errors': error_counts.to_dict(),
+            'top_nack_types': nack_counts.to_dict(),
+            'jur_distribution': group['JUR'].value_counts().to_dict()
+        }
+    
+    return dimension_analysis
+
+def create_summary_report(df, cluster_df, top_n=10):
+    """
+    Create a comprehensive summary report of the error analysis
+    
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        Original DataFrame containing the trade rejection data
+    cluster_df : pandas.DataFrame
+        DataFrame with cluster analysis results
+    top_n : int
+        Number of top items to include in each category
+        
+    Returns:
+    --------
+    str
+        Markdown formatted summary report
+    """
+    report = "# Error Cluster Analysis Summary Report\n\n"
+    
+    # Overall statistics
+    report += "## Overall Statistics\n\n"
+    report += f"- Total Rejections: {len(df)}\n"
+    report += f"- Unique Trades (UTI IDs): {df['Uti Id'].nunique()}\n"
+    report += f"- Unique Message IDs: {df['Fo Message Id'].nunique()}\n"
+    report += f"- Unique Error Types: {df['Error Description'].nunique()}\n"
+    report += f"- Unique NACK Types: {df['NACK Type'].nunique()}\n"
+    report += f"- Jurisdictions: {', '.join(df['JUR'].unique())}\n"
+    report += f"- Asset Classes: {', '.join(df['Asset Class'].unique())}\n"
+    report += f"- FO Systems: {', '.join(df['FO System'].unique())}\n\n"
+    
+    # Top error clusters
+    report += "## Top Error Clusters\n\n"
+    report += "| Cluster | Frequency | Affected Trades | JURs | Asset Classes |\n"
+    report += "|---------|-----------|----------------|------|---------------|\n"
+    
+    for _, row in cluster_df.head(top_n).iterrows():
+        cluster_short = row['Cluster'].split(' || NACK Types:')[0][:50] + '...' if len(row['Cluster']) > 50 else row['Cluster']
+        report += f"| {cluster_short} | {row['Total_Unique_Fo_Message_Ids']} | {row['Total_Unique_Uti_Ids']} | {row['JUR_Breakdown']} | {row['Asset_Classes']} |\n"
+    
+    report += "\n"
+    
+    # Monthly trend
+    report += "## Monthly Trend\n\n"
+    monthly_counts = df.groupby(df['Snapshot Report Date'].dt.strftime('%b-%Y'))['Fo Message Id'].nunique()
+    for month, count in sorted(monthly_counts.items(), key=lambda x: datetime.strptime(x[0], '%b-%Y')):
+        report += f"- {month}: {count} rejections\n"
+    
+    report += "\n"
+    
+    return report
+
+# Example usage
+# df = pd.read_csv('trade_rejection_data.csv')
+# result_df = analyze_error_clusters(df)
+# visualize_top_clusters(result_df)
+# asset_class_analysis = analyze_error_by_dimension(df, 'Asset Class')
+# fo_system_analysis = analyze_error_by_dimension(df, 'FO System')
+# summary_report = create_summary_report(df, result_df)
+# with open('error_analysis_report.md', 'w') as f:
+#     f.write(summary_report)
